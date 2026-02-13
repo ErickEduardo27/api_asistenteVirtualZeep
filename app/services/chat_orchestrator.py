@@ -1,6 +1,7 @@
 from typing import AsyncIterator, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, update
+from datetime import datetime, timezone
 import structlog
 
 from app.models.conversation import Conversation, Message
@@ -28,49 +29,36 @@ class ChatOrchestrator:
         temperature: float = 0.7,
         max_tokens: Optional[int] = 1000
     ) -> AsyncIterator[dict]:
-        """
-        Genera una respuesta de chat con streaming.
-        
-        Args:
-            db: Sesión de base de datos
-            user: Usuario actual
-            user_message: Mensaje del usuario
-            conversation_id: ID de conversación existente o None para nueva
-            use_rag: Si usar RAG para contexto
-            temperature: Temperatura para el LLM
-            max_tokens: Máximo de tokens
-            
-        Yields:
-            Diccionarios con eventos del stream
-        """
+
         try:
-            # Obtener o crear conversación
+            # 🔹 Obtener o crear conversación
             conversation = await self._get_or_create_conversation(
                 db, user, conversation_id
             )
-            
-            # Guardar mensaje del usuario
+
+            # 🔹 Guardar mensaje usuario (SIN commit)
             user_msg = Message(
                 conversation_id=conversation.id,
                 role="user",
                 content=user_message
             )
             db.add(user_msg)
-            await db.commit()
-            
-            # Recuperar contexto RAG si está habilitado
+            await db.flush()  # 🔥 SOLO flush
+
+            # 🔹 RAG
             rag_context = None
             if use_rag:
                 rag_context = await self.rag_service.retrieve_context(
                     db, user_message, user_id=user.id
                 )
-            
-            # Construir historial de mensajes
+
+            # 🔹 Historial
             messages = await self._build_message_history(db, conversation.id)
             messages.append({"role": "user", "content": user_message})
-            
-            # Generar respuesta con streaming
+
             assistant_content = ""
+
+            # 🔥 STREAMING
             async for chunk in self.llm_service.stream_chat(
                 messages=messages,
                 temperature=temperature,
@@ -79,13 +67,14 @@ class ChatOrchestrator:
                 rag_context=rag_context
             ):
                 assistant_content += chunk
+
                 yield {
                     "event": "token",
                     "data": chunk,
                     "conversation_id": conversation.id
                 }
-            
-            # Guardar respuesta del asistente
+
+            # 🔹 Guardar respuesta asistente
             assistant_msg = Message(
                 conversation_id=conversation.id,
                 role="assistant",
@@ -97,9 +86,17 @@ class ChatOrchestrator:
                 }
             )
             db.add(assistant_msg)
-            await db.commit()
             
-            # Evento final
+            # Actualizar updated_at de la conversación
+            await db.execute(
+                update(Conversation)
+                .where(Conversation.id == conversation.id)
+                .values(updated_at=datetime.now(timezone.utc))
+            )
+
+            # 🔥 UN SOLO COMMIT AL FINAL
+            await db.commit()
+
             yield {
                 "event": "done",
                 "data": {
@@ -107,9 +104,11 @@ class ChatOrchestrator:
                     "message_id": assistant_msg.id
                 }
             }
-            
+
         except Exception as e:
-            logger.error("Error in chat orchestrator", error=str(e))
+            await db.rollback()
+            logger.error("Error in chat orchestrator", exc_info=True)
+
             yield {
                 "event": "error",
                 "data": {"error": str(e)}

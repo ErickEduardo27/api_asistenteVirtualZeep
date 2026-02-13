@@ -194,7 +194,6 @@ curl -X POST "http://localhost:8000/api/v1/chat/stream" \
 
 - `DATABASE_URL`: URL de conexión a PostgreSQL
 - `SECRET_KEY`: Clave secreta para JWT (cambiar en producción)
-- `OPENAI_API_KEY`: API key de OpenAI
 - `MINIO_*`: Configuración de MinIO (opcional, usa almacenamiento local si no está configurado)
 
 ## Notas

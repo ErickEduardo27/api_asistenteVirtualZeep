@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     postgres_user: str = "postgres"
     postgres_password: str = "edu_erickxto"
     postgres_db: str = "asistente_virtualZeep"
-    postgres_host: str = "localhost"
+    postgres_host: str = "127.0.0.1"
     postgres_port: int = 5432 
 
     @property
@@ -26,10 +26,10 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
 
-    # OpenAI / LLM
-    openai_api_key: Optional[str] = None
-    llm_model: str = "gpt-4-turbo-preview"
-    embedding_model: str = "text-embedding-3-small"
+    # Google Gemini / LLM
+    gemini_api_key: str = "AIzaSyBhY6UnT3PvMKvlQgW5hM6N2HxVXULc3cw"
+    llm_model: str = "gemini-2.5-flash-lite"  # o "gemini-1.5-flash" para más velocidad
+    embedding_model: str = "models/text-embedding-004"  # Modelo de embedding de Gemini
 
     # Rate Limiting
     rate_limit_per_minute: int = 60

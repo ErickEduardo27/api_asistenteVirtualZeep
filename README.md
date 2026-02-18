@@ -203,3 +203,15 @@ curl -X POST "http://localhost:8000/api/v1/chat/stream" \
 - Usar un secret key fuerte para JWT
 - Configurar MinIO o S3 para almacenamiento de documentos en producción
 
+
+## Despliegue Local
+- Ingresar a WSL desde PowerShell
+- Ingresar a la ubicación de la carpeta "cd /mnt/g/Erick/Git/api_asistenteVirtualZeep"
+- Activar el entorno: source venv/bin/activate
+- Ingresar: uvicorn main:app --host 0.0.0.0 --port 8020 --reload
+
+
+
+## Despliegue Local MinIO
+- erickeduardo@PC02617566:/mnt/c/Users/LENOVO$ wget https://dl.min.io/server/minio/release/linux-amd64/minio
+- erickeduardo@PC02617566:/mnt/c/Users/LENOVO$ ./minio server /home/erickeduardo/minio/data --console-address ":9001"

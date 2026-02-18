@@ -66,7 +66,7 @@ class StorageService:
                     content_type=content_type
                 )
                 logger.info("File uploaded to MinIO", object_name=object_name)
-                return f"{settings.minio_bucket_name}/{object_name}"
+                return object_name
             except S3Error as e:
                 logger.error("Error uploading to MinIO", error=str(e))
                 raise

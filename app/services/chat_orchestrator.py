@@ -22,7 +22,7 @@ class ChatOrchestrator:
     async def stream_chat_response(
         self,
         db: AsyncSession,
-        user: User,
+        user: Optional[User],
         user_message: str,
         conversation_id: Optional[int] = None,
         use_rag: bool = True,
@@ -31,30 +31,40 @@ class ChatOrchestrator:
     ) -> AsyncIterator[dict]:
 
         try:
-            # 🔹 Obtener o crear conversación
-            conversation = await self._get_or_create_conversation(
-                db, user, conversation_id
-            )
+            conversation = None
+            conversation_id_final = None
+            
+            # Solo guardar en BD si hay usuario autenticado
+            if user:
+                # 🔹 Obtener o crear conversación
+                conversation = await self._get_or_create_conversation(
+                    db, user, conversation_id
+                )
+                conversation_id_final = conversation.id
 
-            # 🔹 Guardar mensaje usuario (SIN commit)
-            user_msg = Message(
-                conversation_id=conversation.id,
-                role="user",
-                content=user_message
-            )
-            db.add(user_msg)
-            await db.flush()  # 🔥 SOLO flush
+                # 🔹 Guardar mensaje usuario (SIN commit)
+                user_msg = Message(
+                    conversation_id=conversation.id,
+                    role="user",
+                    content=user_message
+                )
+                db.add(user_msg)
+                await db.flush()  # 🔥 SOLO flush
 
-            # 🔹 RAG
+                # 🔹 Historial
+                messages = await self._build_message_history(db, conversation.id)
+                messages.append({"role": "user", "content": user_message})
+            else:
+                # Usuario no autenticado: sin historial
+                messages = [{"role": "user", "content": user_message}]
+            
+            # 🔹 RAG (disponible incluso sin autenticación)
             rag_context = None
             if use_rag:
+                user_id = user.id if user else None
                 rag_context = await self.rag_service.retrieve_context(
-                    db, user_message, user_id=user.id
+                    db, user_message, user_id=user_id
                 )
-
-            # 🔹 Historial
-            messages = await self._build_message_history(db, conversation.id)
-            messages.append({"role": "user", "content": user_message})
 
             assistant_content = ""
 
@@ -70,40 +80,49 @@ class ChatOrchestrator:
 
                 yield {
                     "event": "token",
-                    "data": chunk,
-                    "conversation_id": conversation.id
+                    "data": chunk
                 }
 
-            # 🔹 Guardar respuesta asistente
-            assistant_msg = Message(
-                conversation_id=conversation.id,
-                role="assistant",
-                content=assistant_content,
-                metadata={
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "use_rag": use_rag
-                }
-            )
-            db.add(assistant_msg)
-            
-            # Actualizar updated_at de la conversación
-            await db.execute(
-                update(Conversation)
-                .where(Conversation.id == conversation.id)
-                .values(updated_at=datetime.now(timezone.utc))
-            )
+            # 🔹 Guardar respuesta asistente (solo si hay usuario)
+            if user and conversation:
+                assistant_msg = Message(
+                    conversation_id=conversation.id,
+                    role="assistant",
+                    content=assistant_content,
+                    metadata={
+                        "temperature": temperature,
+                        "max_tokens": max_tokens,
+                        "use_rag": use_rag
+                    }
+                )
+                db.add(assistant_msg)
+                
+                # Actualizar updated_at de la conversación
+                await db.execute(
+                    update(Conversation)
+                    .where(Conversation.id == conversation.id)
+                    .values(updated_at=datetime.now(timezone.utc))
+                )
 
-            # 🔥 UN SOLO COMMIT AL FINAL
-            await db.commit()
+                # 🔥 UN SOLO COMMIT AL FINAL
+                await db.commit()
 
-            yield {
-                "event": "done",
-                "data": {
-                    "conversation_id": conversation.id,
-                    "message_id": assistant_msg.id
+                yield {
+                    "event": "done",
+                    "data": {
+                        "conversation_id": conversation.id,
+                        "message_id": assistant_msg.id
+                    }
                 }
-            }
+            else:
+                # Sin usuario: no guardar, solo enviar evento done
+                yield {
+                    "event": "done",
+                    "data": {
+                        "conversation_id": None,
+                        "message_id": None
+                    }
+                }
 
         except Exception as e:
             await db.rollback()
@@ -117,10 +136,13 @@ class ChatOrchestrator:
     async def _get_or_create_conversation(
         self,
         db: AsyncSession,
-        user: User,
+        user: Optional[User],
         conversation_id: Optional[int]
-    ) -> Conversation:
+    ) -> Optional[Conversation]:
         """Obtiene una conversación existente o crea una nueva."""
+        if not user:
+            return None
+            
         if conversation_id:
             result = await db.execute(
                 select(Conversation).where(

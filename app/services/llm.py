@@ -1,5 +1,7 @@
 from typing import AsyncIterator, Optional
-import google.generativeai as genai
+from google import genai
+from google.genai import types
+
 from app.config import settings
 import structlog
 import asyncio
@@ -16,21 +18,26 @@ class LLMService:
             self.client = None
             self.model = None
         else:
-            # Configurar Gemini
-            genai.configure(api_key=settings.gemini_api_key)
-            self.client = genai
-            self.model = settings.llm_model
+            # Crear cliente nuevo del SDK moderno
+            self.client = genai.Client(api_key=settings.gemini_api_key)
+            self.model = settings.llm_model  # ej: "gemini-1.5-flash"
             logger.info("Gemini LLM service initialized", model=self.model)
     
     async def stream_chat(
         self,
         messages: list[dict],
-        temperature: float = 0.7,
-        max_tokens: Optional[int] = 1000,
+        temperature: float = 0.0,
+        max_tokens: Optional[int] = 512,
         use_rag: bool = True,
         rag_context: Optional[str] = None
     ) -> AsyncIterator[str]:
-
+        print("Se imprime --------------------------------------------------------------")
+        # 🔒 BLOQUEAR si no hay contexto en modo RAG
+        if use_rag and (not rag_context or not rag_context.strip()):
+            yield "Lo siento, no encontré información sobre eso en los documentos disponibles."
+            return
+            print("No hay contexto en modo RAG")
+        print("SÍ hay contexto en modo RAG")
         if not self.client or not self.model:
             yield "Error: Gemini API key not configured"
             return
@@ -60,13 +67,13 @@ class LLMService:
                 last_user_message = history.pop(0)["parts"][0]
 
             # 🔹 Crear modelo
-            model = genai.GenerativeModel(
+            """ model = genai.GenerativeModel(
                 model_name=self.model,
                 generation_config=genai.types.GenerationConfig(
                     temperature=temperature,
-                    max_output_tokens=max_tokens or 2048,
+                    max_output_tokens=max_tokens or 512,
                 )
-            )
+            ) """
 
             if system_prompt:
                 full_prompt = f"{system_prompt}\n\nUsuario: {last_user_message}"
@@ -79,14 +86,17 @@ class LLMService:
 
             def worker():
                 try:
-                    if history:
-                        chat = model.start_chat(history=history)
-                        response = chat.send_message(full_prompt, stream=True)
-                    else:
-                        response = model.generate_content(full_prompt, stream=True)
+                    response = self.client.models.generate_content_stream(
+                        model=self.model,
+                        contents=full_prompt,
+                        config=types.GenerateContentConfig(
+                            temperature=temperature,
+                            max_output_tokens=max_tokens or 512,
+                        )
+                    )
 
                     for chunk in response:
-                        if hasattr(chunk, "text") and chunk.text:
+                        if chunk.text:
                             asyncio.run_coroutine_threadsafe(
                                 queue.put(chunk.text),
                                 loop
@@ -135,39 +145,50 @@ class LLMService:
             logger.error("Error streaming response", error=str(e))
             yield f"Error: {str(e)}"
     
+    from typing import Optional
+
     def _build_system_prompt(self, use_rag: bool, rag_context: Optional[str] = None) -> str:
         """Construye el prompt del sistema."""
-        base_prompt = """Eres un asistente virtual inteligente y útil. 
-Responde de manera clara, concisa y profesional."""
-        
+
         if use_rag and rag_context:
-            base_prompt += f"\n\nContexto adicional del documento:\n{rag_context}\n\n"
-            base_prompt += "Usa este contexto para proporcionar respuestas más precisas y relevantes. Si la información no está en el contexto, indica que no tienes esa información disponible."
-        
-        return base_prompt
+            return f"""
+                Eres un asistente amable y profesional.
+
+                Usa únicamente la información del CONTEXTO para responder.
+                No uses conocimiento externo ni inventes datos.
+
+                Si la respuesta no está en el CONTEXTO, responde exactamente:
+                "Lo siento, no encontré información sobre eso en los documentos disponibles."
+
+                CONTEXTO:
+                {rag_context}
+                """
+        else:
+            return """
+            Eres un asistente virtual inteligente y útil.
+            Responde de manera clara, concisa y profesional.
+            """
     
     async def create_embedding(self, text: str) -> list[float]:
-        """Crea un embedding para el texto usando Gemini."""
+        """Crea un embedding para el texto usando Gemini con 1536 dimensiones."""
         if not self.client:
             raise ValueError("Gemini API key not configured")
-        
+
         try:
-            # Gemini tiene un modelo específico para embeddings
-            # Usar el modelo de embedding de Gemini
             result = await asyncio.to_thread(
-                genai.embed_content,
+                self.client.models.embed_content,
                 model=settings.embedding_model,
-                content=text,
-                task_type="retrieval_document"  # Para documentos, usar "retrieval_query" para consultas
+                contents=text,
+                config=types.EmbedContentConfig(
+                    output_dimensionality=1536
+                )
             )
-            
-            if result and 'embedding' in result:
-                return result['embedding']
-            elif isinstance(result, dict) and 'embedding' in result:
-                return result['embedding']
-            else:
-                raise ValueError(f"No embedding returned from Gemini. Result: {result}")
-                
+
+            embedding = result.embeddings[0].values
+
+            print(len(embedding))
+            return embedding
+
         except Exception as e:
-            logger.error("Error creating embedding", error=str(e), text_preview=text[:50])
+            logger.error("Error creating embedding: %s", str(e))
             raise

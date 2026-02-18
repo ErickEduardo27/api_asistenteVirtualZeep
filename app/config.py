@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     # Google Gemini / LLM
     gemini_api_key: str = "AIzaSyBhY6UnT3PvMKvlQgW5hM6N2HxVXULc3cw"
     llm_model: str = "gemini-2.5-flash-lite"  # o "gemini-1.5-flash" para más velocidad
-    embedding_model: str = "models/text-embedding-004"  # Modelo de embedding de Gemini
+    embedding_model: str = "models/gemini-embedding-001"  # Modelo de embedding de Gemini
 
     # Rate Limiting
     rate_limit_per_minute: int = 60

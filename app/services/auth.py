@@ -4,7 +4,7 @@ from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import OAuth2PasswordBearer
 
 from app.config import settings
@@ -81,3 +81,35 @@ async def get_current_active_user(
         raise HTTPException(status_code=400, detail="Inactive user")
     return current_user
 
+
+async def get_optional_user_from_header(
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+) -> Optional[User]:
+    """Obtiene el usuario actual si está autenticado, None si no lo está."""
+    # Obtener el header Authorization
+    authorization = request.headers.get("Authorization")
+    if not authorization:
+        return None
+    
+    # Extraer el token del formato "Bearer <token>"
+    try:
+        scheme, token = authorization.split()
+        if scheme.lower() != "bearer":
+            return None
+    except ValueError:
+        return None
+    
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        username: str = payload.get("sub")
+        if username is None:
+            return None
+    except JWTError:
+        return None
+    
+    result = await db.execute(select(User).where(User.username == username))
+    user = result.scalar_one_or_none()
+    if user is None or not user.is_active:
+        return None
+    return user

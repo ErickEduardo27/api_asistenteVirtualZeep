@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, desc
@@ -8,7 +8,7 @@ import structlog
 from app.database import get_db
 from app.schemas.chat import ChatRequest, MessageResponse, ConversationResponse, MessagesResponse
 from app.services.chat_orchestrator import ChatOrchestrator
-from app.services.auth import get_current_active_user
+from app.services.auth import get_current_active_user, get_optional_user_from_header
 from app.models.user import User
 from app.models.conversation import Conversation, Message
 
@@ -38,6 +38,37 @@ async def stream_chat(
             use_rag=request.use_rag,
             temperature=request.temperature,
             max_tokens=request.max_tokens
+        ):
+            yield {
+                "event": event.get("event", "message"),
+                "data": event.get("data", "")
+            }
+    
+    return EventSourceResponse(event_generator())
+
+
+@router.post("/stream/public")
+async def stream_chat_public(
+    chat_request: ChatRequest,
+    http_request: Request,
+    db: AsyncSession = Depends(get_db),
+    current_user: Optional[User] = Depends(get_optional_user_from_header)
+):
+    """
+    Endpoint público para chat con streaming (sin autenticación requerida).
+    Si el usuario está autenticado, guarda la conversación. Si no, solo responde.
+    """
+    orchestrator = ChatOrchestrator()
+    
+    async def event_generator():
+        async for event in orchestrator.stream_chat_response(
+            db=db,
+            user=current_user,  # Puede ser None
+            user_message=chat_request.message,
+            conversation_id=chat_request.conversation_id if current_user else None,
+            use_rag=chat_request.use_rag,  # Permitir RAG incluso sin autenticación
+            temperature=chat_request.temperature,
+            max_tokens=chat_request.max_tokens
         ):
             yield {
                 "event": event.get("event", "message"),
@@ -154,55 +185,54 @@ async def get_messages(
 
 @router.get("/messages/latest", response_model=MessagesResponse)
 async def get_latest_messages(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(10, ge=1, le=100),
-    current_user: User = Depends(get_current_active_user),
-    db: AsyncSession = Depends(get_db)
-):
-    # Obtener total de mensajes del usuario (todas sus conversaciones)
-    total_result = await db.execute(
-        select(func.count(Message.id))
-        .join(Conversation)
-        .where(Conversation.user_id == current_user.id)
-    )
-    total = total_result.scalar() or 0
+        page: int = Query(1, ge=1),
+        page_size: int = Query(10, ge=1, le=100),
+        current_user: User = Depends(get_current_active_user),
+        db: AsyncSession = Depends(get_db)
+    ):
+        """
+        Obtiene los mensajes más recientes del usuario
+        (todas sus conversaciones combinadas).
+        """
 
-    offset = (page - 1) * page_size
+        # Total de mensajes del usuario
+        total_result = await db.execute(
+            select(func.count(Message.id))
+            .join(Conversation, Message.conversation_id == Conversation.id)
+            .where(Conversation.user_id == current_user.id)
+        )
+        total = total_result.scalar_one() or 0
 
-    # Obtener mensajes más recientes del usuario
-    messages_result = await db.execute(
-        select(Message)
-        .join(Conversation)
-        .where(Conversation.user_id == current_user.id)
-        .order_by(desc(Message.created_at))
-        .limit(page_size)
-        .offset(offset)
-    )
+        offset = (page - 1) * page_size
 
-    messages = messages_result.scalars().all()
-    
-        
-    # Los mensajes ya vienen ordenados: más recientes primero
-    # has_more: si hay más mensajes después de esta página
-    # Asegurar que siempre devolvamos exactamente page_size mensajes si hay suficientes
-    has_more = total > (offset + len(messages))
-    
-    logger.info(
-        "Retrieved latest messages",
-        conversation_id=latest_conversation.id,
-        page=page,
-        page_size=page_size,
-        total=total,
-        returned=len(messages),
-        has_more=has_more
-    )
-    
-    return MessagesResponse(
-        messages=[MessageResponse.model_validate(msg) for msg in messages],
-        total=total,
-        page=page,
-        page_size=page_size,
-        has_more=has_more,
-        conversation_id=latest_conversation.id
-    )
+        # Obtener mensajes más recientes
+        messages_result = await db.execute(
+            select(Message)
+            .join(Conversation, Message.conversation_id == Conversation.id)
+            .where(Conversation.user_id == current_user.id)
+            .order_by(desc(Message.created_at))
+            .limit(page_size)
+            .offset(offset)
+        )
 
+        messages = messages_result.scalars().all()
+
+        # Verificar si hay más páginas
+        has_more = total > (offset + len(messages))
+
+        logger.info(
+            "Retrieved latest messages",
+            page=page,
+            page_size=page_size,
+            total=total,
+            returned=len(messages),
+            has_more=has_more
+        )
+
+        return MessagesResponse(
+            messages=[MessageResponse.model_validate(msg) for msg in messages],
+            total=total,
+            page=page,
+            page_size=page_size,
+            has_more=has_more
+        )

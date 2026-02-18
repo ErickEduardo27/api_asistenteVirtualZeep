@@ -114,7 +114,6 @@ async def ingest_document(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Document is already being processed"
         )
-    
     try:
         # Descargar archivo del storage
         storage_service = StorageService()
@@ -128,6 +127,8 @@ async def ingest_document(
         chunks_created, embeddings_created = await processor.process_document(
             db, document, temp_path
         )
+
+        await db.commit()   # 🔥 ESTO FALTABA
         
         # Limpiar archivo temporal
         if os.path.exists(temp_path):

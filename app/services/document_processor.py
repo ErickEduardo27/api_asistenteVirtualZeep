@@ -7,6 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.document import Document, DocumentChunk, DocumentStatus
 from app.services.rag import RAGService
 
+from sqlalchemy import delete, select
+from app.models.embedding import Embedding
+
 logger = structlog.get_logger()
 
 
@@ -35,43 +38,34 @@ class DocumentProcessor:
         Returns:
             Tupla con (chunks_created, embeddings_created)
         """
+        
         try:
-            # Actualizar estado
             document.status = DocumentStatus.PROCESSING
-            await db.commit()
-            
-            # Extraer texto según el tipo de archivo
+            await db.flush()
+
+            # 🔥 BORRAR DATOS ANTERIORES
+            await self._delete_old_chunks_and_embeddings(db, document.id)
+
             text = await self._extract_text(file_path, document.file_type)
-            
+            print("TEXT LENGTH:", len(text))
             if not text:
-                document.status = DocumentStatus.ERROR
-                await db.commit()
-                return 0, 0
-            
-            # Crear chunks
+                raise ValueError("No text extracted")
+
             chunks = await self._create_chunks(db, document, text)
-            
-            # Procesar embeddings
+
             embeddings_created = await self.rag_service.process_document_chunks(db, chunks)
-            
-            # Actualizar estado
+
             document.status = DocumentStatus.PROCESSED
-            await db.commit()
-            
-            logger.info(
-                "Document processed",
-                document_id=document.id,
-                chunks=len(chunks),
-                embeddings=embeddings_created
-            )
-            
+            await db.flush()
+
             return len(chunks), embeddings_created
-            
-        except Exception as e:
-            logger.error("Error processing document", document_id=document.id, error=str(e))
+
+        except Exception:
+            logger.exception("FATAL ERROR PROCESSING DOCUMENT")
+            await db.rollback()
             document.status = DocumentStatus.ERROR
-            await db.commit()
-            return 0, 0
+            await db.flush()
+            raise
     
     async def _extract_text(self, file_path: str, file_type: str) -> str:
         """Extrae texto de un archivo según su tipo."""
@@ -88,17 +82,22 @@ class DocumentProcessor:
         except Exception as e:
             logger.error("Error extracting text", file_path=file_path, error=str(e))
             return ""
-    
+
     async def _extract_from_pdf(self, file_path: str) -> str:
-        """Extrae texto de un PDF."""
         try:
             import PyPDF2
             text = ""
+
             with open(file_path, "rb") as file:
                 pdf_reader = PyPDF2.PdfReader(file)
+
                 for page in pdf_reader.pages:
-                    text += page.extract_text() + "\n"
-            return text
+                    page_text = page.extract_text()
+                    if page_text:
+                        text += page_text + "\n"
+
+            return text.strip()
+
         except Exception as e:
             logger.error("Error extracting from PDF", error=str(e))
             return ""
@@ -130,24 +129,30 @@ class DocumentProcessor:
         text: str
     ) -> List[DocumentChunk]:
         """Crea chunks del texto."""
+
         chunks = []
         start = 0
         chunk_index = 0
-        
+
         while start < len(text):
+
             end = start + self.chunk_size
             chunk_text = text[start:end]
-            
-            # Intentar cortar en un punto lógico (punto, salto de línea)
+
+            # 🔥 evitar chunks vacíos
+            if not chunk_text.strip():
+                break
+
+            # Intentar cortar en punto lógico
             if end < len(text):
                 last_period = chunk_text.rfind(".")
                 last_newline = chunk_text.rfind("\n")
                 cut_point = max(last_period, last_newline)
-                if cut_point > self.chunk_size * 0.5:  # Solo si no es muy pequeño
+
+                if cut_point > self.chunk_size * 0.5:
                     chunk_text = chunk_text[:cut_point + 1]
                     end = start + len(chunk_text)
-            
-            # Crear chunk
+
             chunk = DocumentChunk(
                 document_id=document.id,
                 chunk_index=chunk_index,
@@ -158,14 +163,35 @@ class DocumentProcessor:
                     "length": len(chunk_text)
                 }
             )
-            
+
             db.add(chunk)
             chunks.append(chunk)
-            
-            # Mover inicio con overlap
+
             start = end - self.chunk_overlap
             chunk_index += 1
-        
-        await db.commit()
+
+        await db.flush()  # 🔥 mejor que commit aquí
         return chunks
+
+    async def _delete_old_chunks_and_embeddings(self, db: AsyncSession, document_id: int):
+        """Borra chunks y embeddings anteriores."""
+        # Borrar embeddings
+        await db.execute(
+            delete(Embedding).where(
+                Embedding.chunk_id.in_(
+                    select(DocumentChunk.id).where(
+                        DocumentChunk.document_id == document_id
+                    )
+                )
+            )
+        )
+
+        # Borrar chunks
+        await db.execute(
+            delete(DocumentChunk).where(
+                DocumentChunk.document_id == document_id
+            )
+        )
+
+        await db.flush()
 

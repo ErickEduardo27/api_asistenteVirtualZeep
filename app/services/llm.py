@@ -31,13 +31,13 @@ class LLMService:
         use_rag: bool = True,
         rag_context: Optional[str] = None
     ) -> AsyncIterator[str]:
-        print("Se imprime --------------------------------------------------------------")
+
         # 🔒 BLOQUEAR si no hay contexto en modo RAG
         if use_rag and (not rag_context or not rag_context.strip()):
             yield "Lo siento, no encontré información sobre eso en los documentos disponibles."
             return
-            print("No hay contexto en modo RAG")
-        print("SÍ hay contexto en modo RAG")
+
+        
         if not self.client or not self.model:
             yield "Error: Gemini API key not configured"
             return
@@ -186,7 +186,6 @@ class LLMService:
 
             embedding = result.embeddings[0].values
 
-            print(len(embedding))
             return embedding
 
         except Exception as e:

@@ -47,7 +47,7 @@ class DocumentProcessor:
             await self._delete_old_chunks_and_embeddings(db, document.id)
 
             text = await self._extract_text(file_path, document.file_type)
-            print("TEXT LENGTH:", len(text))
+            
             if not text:
                 raise ValueError("No text extracted")
 

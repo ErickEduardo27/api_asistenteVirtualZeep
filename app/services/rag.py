@@ -236,7 +236,6 @@ class RAGService:
             chunks = await self.search_similar_chunks(
                 db, query_embedding, user_id, top_k
             )
-            print("CHUNKS ENCONTRADOS:", len(chunks))
 
             if not chunks:
                 logger.info("No relevant chunks found")

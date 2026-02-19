@@ -3,9 +3,23 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 
 
-class DocumentUpload(BaseModel):
+class PresignedUrlRequest(BaseModel):
     filename: str
     file_type: str
+    file_size: int
+
+
+class PresignedUrlResponse(BaseModel):
+    presigned_url: str
+    object_name: str
+    expires_in: int  # segundos
+
+
+class DocumentMetadata(BaseModel):
+    filename: str
+    file_type: str
+    file_size: int
+    object_name: str  # Nombre del objeto en MinIO
 
 
 class DocumentResponse(BaseModel):

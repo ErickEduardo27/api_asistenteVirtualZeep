@@ -1,5 +1,6 @@
 from minio import Minio
 from minio.error import S3Error
+from datetime import timedelta
 import structlog
 from app.config import settings
 from typing import Optional
@@ -110,4 +111,41 @@ class StorageService:
             return local_path
         else:
             raise FileNotFoundError(f"File not found: {local_path}")
+    
+    def generate_presigned_url(
+        self,
+        object_name: str,
+        expires: timedelta = timedelta(hours=1),
+        method: str = "PUT"
+    ) -> str:
+        """
+        Genera una URL firmada (presigned URL) para subir/descargar un objeto.
+        
+        Args:
+            object_name: Nombre del objeto en storage
+            expires: Tiempo de expiración de la URL (default: 1 hora)
+            method: Método HTTP ("PUT" para subir, "GET" para descargar)
+            
+        Returns:
+            URL firmada
+        """
+        if not self.client:
+            raise ValueError("MinIO client not available. Cannot generate presigned URL.")
+        
+        try:
+            from datetime import datetime, timezone
+            url = self.client.presigned_put_object(
+                settings.minio_bucket_name,
+                object_name,
+                expires=expires
+            ) if method == "PUT" else self.client.presigned_get_object(
+                settings.minio_bucket_name,
+                object_name,
+                expires=expires
+            )
+            logger.info("Generated presigned URL", object_name=object_name, method=method)
+            return url
+        except S3Error as e:
+            logger.error("Error generating presigned URL", error=str(e))
+            raise
 

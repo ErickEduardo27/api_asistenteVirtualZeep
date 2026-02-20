@@ -1,18 +1,11 @@
 import os
 import uuid
-from datetime import timedelta
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.database import get_db
-from app.schemas.document import (
-    DocumentResponse, 
-    DocumentIngestResponse,
-    PresignedUrlRequest,
-    PresignedUrlResponse,
-    DocumentMetadata
-)
+from app.schemas.document import DocumentResponse, DocumentIngestResponse
 from app.models.document import Document, DocumentStatus
 from app.services.storage import StorageService
 from app.services.document_processor import DocumentProcessor
@@ -22,82 +15,54 @@ from app.models.user import User
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 
-@router.post("/presigned-url", response_model=PresignedUrlResponse)
-async def get_presigned_url(
-    request: PresignedUrlRequest,
-    current_user: User = Depends(get_current_active_user),
-):
-    """
-    Genera una URL firmada (presigned URL) para que el frontend suba el archivo directamente a MinIO.
-    """
-    # Validar tipo de archivo
-    allowed_types = ["pdf", "docx", "txt"]
-    file_type_lower = request.file_type.lower()
-    if file_type_lower not in allowed_types:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File type {request.file_type} not allowed. Allowed types: PDF, DOCX, TXT"
-        )
-    
-    # Generar nombre único para el objeto en MinIO
-    file_extension = f".{file_type_lower}"
-    object_name = f"{current_user.id}/{uuid.uuid4()}{file_extension}"
-    
-    # Generar presigned URL
-    storage_service = StorageService()
-    try:
-        presigned_url = storage_service.generate_presigned_url(
-            object_name=object_name,
-            expires=timedelta(hours=1),
-            method="PUT"
-        )
-        
-        return PresignedUrlResponse(
-            presigned_url=presigned_url,
-            object_name=object_name,
-            expires_in=3600  # 1 hora en segundos
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error generating presigned URL: {str(e)}"
-        )
-
-
 @router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
-async def upload_document_metadata(
-    metadata: DocumentMetadata,
+async def upload_document(
+    file: UploadFile = File(...),
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Registra la metadata de un documento después de que el frontend lo haya subido a MinIO.
-    El archivo ya debe estar en MinIO usando la presigned URL.
+    Sube un documento para procesamiento posterior.
     """
-    # Validar que el object_name pertenece al usuario actual
-    if not metadata.object_name.startswith(f"{current_user.id}/"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid object name for current user"
-        )
-    
     # Validar tipo de archivo
-    allowed_types = ["pdf", "docx", "txt"]
-    file_type_lower = metadata.file_type.lower()
-    if file_type_lower not in allowed_types:
+    allowed_types = ["application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "text/plain"]
+    if file.content_type not in allowed_types:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File type {metadata.file_type} not allowed. Allowed types: PDF, DOCX, TXT"
+            detail=f"File type {file.content_type} not allowed. Allowed types: PDF, DOCX, TXT"
         )
     
+    # Guardar archivo temporalmente
+    file_extension = os.path.splitext(file.filename)[1]
+    temp_filename = f"{uuid.uuid4()}{file_extension}"
+    temp_path = f"temp/{temp_filename}"
+    
+    os.makedirs("temp", exist_ok=True)
+    
     try:
+        # Guardar archivo temporal
+        with open(temp_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+        
+        file_size = len(content)
+        
+        # Guardar archivo en almacenamiento local
+        storage_service = StorageService()
+        object_name = f"{current_user.id}/{uuid.uuid4()}{file_extension}"
+        storage_path = await storage_service.upload_file(
+            temp_path,
+            object_name,
+            content_type=file.content_type
+        )
+        
         # Crear registro en BD
         document = Document(
             user_id=current_user.id,
-            filename=metadata.filename,
-            file_path=metadata.object_name,  # El object_name es el path en MinIO
-            file_type=file_type_lower,
-            file_size=metadata.file_size,
+            filename=file.filename,
+            file_path=storage_path,
+            file_type=file_extension[1:].lower(),  # Sin el punto
+            file_size=file_size,
             status=DocumentStatus.UPLOADED
         )
         
@@ -105,13 +70,18 @@ async def upload_document_metadata(
         await db.commit()
         await db.refresh(document)
         
+        # Limpiar archivo temporal
+        os.remove(temp_path)
+        
         return document
         
     except Exception as e:
-        await db.rollback()
+        # Limpiar en caso de error
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error saving document metadata: {str(e)}"
+            detail=f"Error uploading document: {str(e)}"
         )
 
 
@@ -145,9 +115,9 @@ async def ingest_document(
             detail="Document is already being processed"
         )
     try:
-        # Descargar archivo del storage
+        # Copiar archivo del almacenamiento local a temporal para procesamiento
         storage_service = StorageService()
-        temp_path = f"temp/{uuid.uuid4()}"
+        temp_path = f"temp/{uuid.uuid4()}{os.path.splitext(document.file_path)[1]}"
         os.makedirs("temp", exist_ok=True)
         
         await storage_service.download_file(document.file_path, temp_path)
